@@ -263,7 +263,7 @@ management, TLS, and auth on both services.
 - **Both sides declare the topology.** Events published before the worker has
   ever started are queued, not dropped as unroutable.
 
-### D-23 Publishing never affects measurement — Accepted
+### D-23 Publishing never affects measurement — Accepted, amended by D-32
 - `publish()` only appends to an in-memory buffer; a background task sends from
   it. A slow or down broker cannot change timings.
 - While the broker is unreachable, sending is retried (the connection
@@ -391,7 +391,7 @@ Compose gives runners `stop_grace_period: 30s`. Verified: a runner stopped
 mid-run shut down in under 0.2 s, and its interrupted run was in MongoDB with
 every record.
 
-### D-30 Result files: per-device folders, bounded retention — Accepted
+### D-30 Result files: per-device folders, bounded retention — Accepted, amended by D-33 and D-34
 - **Per-device folders.** A scheduled runner writes to
   `output/<device_id>/` (the id made safe for file paths). Runners can share a
   volume without pruning each other's files.
@@ -412,3 +412,72 @@ With many runners, "follow latest run" would jump between routers.
 
 A cross-run **trend view** (QoE and latency per device over time) is the
 natural next step for scheduled data. It is not built yet.
+
+---
+
+## Offline delivery and result files (added 2026-10-19)
+
+Discussion and rejected options: `docs/discussions/result-files.md`.
+
+### D-32 Scheduled runners keep a SQLite outbox — Accepted
+Trains can be out of reach of the central broker for days. Before this change,
+the in-memory buffer (10 000 events, about 23 runs) dropped events beyond that,
+and a restart or power loss lost whatever was buffered. A runner that could not
+reach RabbitMQ within 120 s of starting also exited and restarted in a loop, so
+a router rebooted while offline measured nothing.
+
+- **The outbox:** `output/<device_id>/outbox.db` (SQLite), scheduled runners
+  only. `publish()` stays synchronous: it inserts the envelope as one row, then
+  puts it on the in-memory buffer. When the broker confirms an event, its row
+  is deleted.
+- **Normally nothing reads it.** Events go out from memory as before. The outbox
+  is read only for **backlog**: rows from a previous process, or rows that did
+  not fit in a full buffer. Backlog is read only once the buffer is empty.
+- **Backlog is sent between runs only.** The runner pauses it for the length of
+  each run, so catch-up traffic never shares the link with a measurement. Live
+  events of the run itself still go out during it.
+- **Durability:** WAL with `synchronous=NORMAL`. No fsync per event; a power cut
+  can lose the last moments of events but cannot corrupt the file.
+- **One process, one file.** SQLite is a library inside the runner, not a
+  service. The file is on the host (D-34), so it outlives the container, and a
+  new container with the same `device_id` sends the backlog. Each device id
+  must therefore belong to exactly one runner. The file must not be opened from
+  the host while the runner is running: WAL relies on shared memory, which is
+  not reliable across Docker Desktop's file sharing.
+- **Storage errors never reach measurement.** If an insert fails (e.g. disk
+  full), the event is kept in memory only, and one warning is logged per streak
+  of failures. A failed delete leaves the event to be sent again, harmlessly.
+- **Cap:** `publish.max_outbox_mb` (`QOE_MAX_OUTBOX_MB`, default 200, about 300k
+  events or 7 days at the default cadence). When it is reached, the oldest
+  events are dropped, at least 1 % of the cap at a time, and a warning is
+  logged with the count. An emptied outbox shrinks back (incremental vacuum).
+- **Repeats are harmless.** An event sent but not confirmed before a stop is
+  sent again later; MongoDB upserts make that a no-op (D-24). `sent_at` is the
+  time the event was created, not when a backlog copy was sent.
+- **Sending:** up to 100 events are published concurrently and confirmed
+  together, which matters on high-RTT links. Failed sends and connection
+  attempts back off up to 60 s and log one line per outage, not per retry.
+- **Starting without the broker (amends D-23):** a scheduled runner starts
+  measuring at once and connects in the background, retrying indefinitely.
+  Single runs are unchanged: they refuse to start without the broker and have
+  no outbox, so a full buffer still drops events there.
+- Why SQLite and not the result files as the outbox: files would mean building
+  our own durable queue (markers, replay, partial lines, safe deletion). A
+  local RabbitMQ with a shovel was the alternative; it costs a second broker on
+  every router.
+
+### D-33 Result files are a byproduct, capped by size — Accepted
+- Nothing reads the result files back; RabbitMQ is fed from memory and the
+  outbox. They are for single runs without a broker and for people inspecting
+  a run. Their format is unchanged.
+- **Amends D-30:** a scheduled runner keeps the newest runs that fit within
+  both `keep_output_runs` (default 96) and `schedule.max_output_mb`
+  (`QOE_MAX_OUTPUT_MB`, default 50). Whichever limit is reached first applies,
+  and it can remove even the newest run. The outbox is never pruned this way.
+
+### D-34 Runner output is a bind mount — Accepted
+- Compose mounts `./output:/app/output` instead of the `runner-output` named
+  volume, so results and outboxes can be browsed on the host.
+- On macOS this works as is. On a Linux host the folder must be writable by the
+  container user (uid 10001): `sudo chown 10001 output`. The runner checks at
+  startup and exits with that hint if it cannot write.

@@ -58,17 +58,23 @@ def device_output_dir(base: Path, device_id: str) -> Path:
     return base / (_SAFE.sub("_", device_id).strip("._") or "device")
 
 
-def prune_outputs(directory: Path, keep: int) -> list[str]:
-    """Delete result files of all but the newest `keep` runs; return the removed run ids.
+def prune_outputs(directory: Path, keep: int, max_bytes: int) -> list[str]:
+    """Keep the newest runs that fit within both `keep` runs and `max_bytes`; delete the rest (D-33).
 
-    Runs are found by their requests file, which exists even when a run was
-    killed before writing its summary.
+    Returns the removed run ids. Runs are found by their requests file, which
+    exists even when a run was killed before writing its summary. The outbox
+    database in the same folder is never touched.
     """
     requests = sorted(directory.glob("*-requests.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     removed = []
-    for path in requests[keep:]:
+    total = 0
+    for index, path in enumerate(requests):
         run_id = path.name.removesuffix("-requests.jsonl")
+        summary = directory / f"{run_id}-summary.json"
+        total += path.stat().st_size + (summary.stat().st_size if summary.exists() else 0)
+        if index < keep and total <= max_bytes:
+            continue
         path.unlink(missing_ok=True)
-        (directory / f"{run_id}-summary.json").unlink(missing_ok=True)
+        summary.unlink(missing_ok=True)
         removed.append(run_id)
     return removed

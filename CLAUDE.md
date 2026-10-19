@@ -50,6 +50,7 @@ To check the pipeline end to end:
   - `main.py` is the CLI: single or scheduled mode, and SIGTERM handling.
   - `scheduler.py`: cadence, jitter, retention, per-device output folders.
   - `publisher.py`: buffered RabbitMQ publishing.
+  - `outbox.py`: the SQLite outbox of unconfirmed events (scheduled runners).
 - `app/events.py`: the message contract. The publisher and worker must agree on it.
 - `app/settings.py`: `QOE_RABBITMQ_URL` / `QOE_MONGO_URL` / `QOE_MONGO_DB` for the worker and API.
 - `app/ingest_worker/`: `store.py` holds the pure update builders plus `Store`; `main.py` holds the consumer loop and ack rules.
@@ -89,13 +90,17 @@ To check the pipeline end to end:
 - **Publishing:**
   - It never blocks or fails measurement: `publish()` is synchronous and buffered.
   - Files are written regardless.
-  - A scheduled runner keeps one connection for its lifetime.
+  - A scheduled runner keeps one connection for its lifetime, and starts measuring even if the broker is unreachable.
+- **Outbox (scheduled runners):**
+  - An event's row is inserted before it is buffered, and deleted only on the broker's confirm.
+  - Backlog is read only when the buffer is empty, and sent only between runs (`backlog_allowed`).
+  - It is capped (`max_outbox_mb`); over the cap the oldest events are dropped with a warning.
 - **Ingest:**
   - Ack only after the MongoDB write.
   - Writes are idempotent upserts by natural id.
   - Malformed messages go to the dead-letter queue.
 - **Message schema:** a change means bumping `schema_version`, and keeping the worker able to read the old version.
-- **Output retention:** scheduled runners prune only their own `output/<device_id>/` folder. Single runs never delete.
+- **Output retention:** scheduled runners prune only result files in their own `output/<device_id>/` folder, within both `keep_output_runs` and `max_output_mb`, and never the outbox. Single runs never delete.
 - **Dashboard:**
   - The browser only talks to the read-only API.
   - Live figures come from MongoDB aggregation; finished runs show the runner's summary.
@@ -136,6 +141,7 @@ To check the pipeline end to end:
 - Same-host throughput comes out in the Gbps range and means nothing (D-02, D-04).
 - `fastapi.testclient` emits a Starlette deprecation warning about httpx. It is harmless.
 - RabbitMQ's `guest` user is refused through Docker port mappings; use `qoe`/`qoe`.
+- Runners bind-mount `./output`. On a Linux host it must be writable by uid 10001 (`sudo chown 10001 output`); macOS needs nothing.
 - shadcn CLI v4: `init -y -b radix -p nova`. The `cn` import in generated components is shadcn's own `cn` npm package.
 - Recharts 3 sorts legend and tooltip items alphabetically unless you pass `itemSorter`.
 - Headless Chrome screenshots of the dashboard are unreliable from the command line:

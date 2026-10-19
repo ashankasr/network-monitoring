@@ -12,7 +12,7 @@ import logging
 import random
 import signal
 import sys
-import time
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ import yaml
 
 from app.events import REQUEST_MEASURED, RUN_FINISHED, RUN_STARTED
 from app.traffic_generator.config import Config, load_config
+from app.traffic_generator.outbox import Outbox
 from app.traffic_generator.publisher import EventPublisher, PublishError
 from app.traffic_generator.reporter import (
     JsonlWriter,
@@ -33,9 +34,7 @@ from app.traffic_generator.reporter import (
 from app.traffic_generator.runner import PreflightError, Runner, RunResult, preflight
 from app.traffic_generator.scheduler import device_output_dir, prune_outputs, run_schedule
 
-PUBLISHER_RETRY_DELAY_S = 5.0
-# A scheduled runner waits this long for the broker at startup (e.g. when containers start together).
-SCHEDULED_PUBLISHER_WAIT_S = 120.0
+MB = 1_000_000
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -90,20 +89,12 @@ def install_sigterm_handler() -> None:
         pass  # Windows: no loop signal handlers; Ctrl+C still works.
 
 
-async def start_publisher(config: Config, wait_s: float) -> EventPublisher:
-    """Connect to RabbitMQ, retrying for up to `wait_s` seconds before giving up."""
-    assert config.publish is not None
-    deadline = time.monotonic() + wait_s
-    while True:
-        publisher = EventPublisher(config.publish.rabbitmq_url, config.publish.buffer_size)
-        try:
-            await publisher.start()
-            return publisher
-        except PublishError as exc:
-            if time.monotonic() >= deadline:
-                raise
-            log(f"{exc}; retrying in {PUBLISHER_RETRY_DELAY_S:.0f}s")
-            await asyncio.sleep(PUBLISHER_RETRY_DELAY_S)
+def check_writable(directory: Path) -> None:
+    """Create `directory` if needed and prove a file can be written in it; raise OSError if not."""
+    directory.mkdir(parents=True, exist_ok=True)
+    # A unique name: runners sharing the folder can have the same PID in their own containers.
+    with tempfile.NamedTemporaryFile(dir=directory, prefix=".write-test-"):
+        pass
 
 
 async def run_one(
@@ -137,10 +128,16 @@ async def run_one(
 
 
 def events_line(publisher: EventPublisher, final: bool) -> str:
-    """Before the publisher closes, unsent events are still in flight ("pending"), not lost."""
-    unsent = "undelivered" if final else "pending"
-    return (f"Events:   {publisher.published} published, {publisher.undelivered} {unsent}, "
-            f"{publisher.dropped} dropped (buffer full)")
+    """Before the publisher closes, unsent events are still in flight ("pending"), not lost.
+
+    With an outbox, unsent events are kept on disk for the next start, so they are never "undelivered".
+    """
+    if publisher.outbox is not None:
+        unsent = "waiting in the outbox"
+    else:
+        unsent = "undelivered" if final else "pending"
+    return (f"Events:   {publisher.published} published, {publisher.pending} {unsent}, "
+            f"{publisher.dropped} dropped")
 
 
 async def single(config: Config, output_dir: Path) -> tuple[RunResult, dict]:
@@ -150,7 +147,10 @@ async def single(config: Config, output_dir: Path) -> tuple[RunResult, dict]:
     print(f"Profile: {config.profile.type}")
     print(f"Target:  {config.target.base_url}")
     print(f"Limits:  {describe(config)}  (Ctrl+C to stop early)", flush=True)
-    publisher = await start_publisher(config, wait_s=0) if config.publish is not None else None
+    publisher = None
+    if config.publish is not None:
+        publisher = EventPublisher(config.publish.rabbitmq_url, config.publish.buffer_size)
+        await publisher.start()
     try:
         if publisher is not None:
             print(f"Publish: {config.publish.rabbitmq_url.split('@')[-1]} (live events on)", flush=True)
@@ -178,22 +178,33 @@ async def scheduled(config: Config, base_output_dir: Path) -> int:
         f"{describe(config)} -> {config.target.base_url}")
 
     publisher = None
+    outbox = None
     if config.publish is not None:
-        publisher = await start_publisher(config, wait_s=SCHEDULED_PUBLISHER_WAIT_S)
-        log(f"Publishing to {config.publish.rabbitmq_url.split('@')[-1]}")
+        # Measure even while the broker is unreachable; events wait in the outbox (D-32).
+        outbox = Outbox(output_dir / "outbox.db", config.publish.max_outbox_mb * MB)
+        publisher = EventPublisher(config.publish.rabbitmq_url, config.publish.buffer_size, outbox)
+        publisher.start_in_background()
+        backlog = f", {outbox.count} events waiting from before" if outbox.count else ""
+        log(f"Publishing to {config.publish.rabbitmq_url.split('@')[-1]} "
+            f"(outbox {outbox.path}, cap {config.publish.max_outbox_mb} MB{backlog})")
 
     async def once() -> bool:
         run_id = str(uuid4())
         log(f"Run {run_id} starting")
+        if publisher is not None:
+            publisher.backlog_allowed.clear()  # catch-up traffic stays out of the measurement
         try:
             result, summary = await run_one(config, run_id, output_dir, publisher, progress_interval_s=15.0)
         except PreflightError as exc:
             log(f"Run skipped: {exc}")
             return True
+        finally:
+            if publisher is not None:
+                publisher.backlog_allowed.set()
         print(format_summary(summary), flush=True)
         if publisher is not None:
             print(events_line(publisher, final=False), flush=True)
-        removed = prune_outputs(output_dir, schedule.keep_output_runs)
+        removed = prune_outputs(output_dir, schedule.keep_output_runs, schedule.max_output_mb * MB)
         if removed:
             log(f"Removed result files of {len(removed)} old run(s)")
         return result.stopped_by != "interrupt"
@@ -211,11 +222,17 @@ async def scheduled(config: Config, base_output_dir: Path) -> int:
         if publisher is not None:
             await publisher.close()
             print(events_line(publisher, final=True), flush=True)
+        if outbox is not None:
+            outbox.close()
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    # aiormq and aio_pika log every failed (re)connection attempt; over days offline that is
+    # thousands of lines. The publisher logs one line per outage instead.
+    logging.getLogger("aiormq.connection").setLevel(logging.CRITICAL)
+    logging.getLogger("aio_pika.robust_connection").setLevel(logging.ERROR)
     args = parse_args(argv)
     overrides: dict[str, dict[str, Any]] = {}
     if args.duration is not None:
@@ -231,7 +248,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.once:
         config = config.model_copy(update={"schedule": None})
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        check_writable(args.output_dir)
+    except OSError as exc:
+        print(f"Output folder {args.output_dir} is not writable: {exc}\n"
+              "In Docker on Linux, make the bind-mounted folder writable by the container user "
+              "(uid 10001): sudo chown 10001 output", file=sys.stderr)
+        return 1
 
     try:
         if config.schedule is not None:

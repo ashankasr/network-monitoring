@@ -1,0 +1,24 @@
+[project]
+name = "onboard-qoe-poc"
+version = "0.1.0"
+description = "Proof of concept: synthetic passenger-like HTTP traffic, measured and summarised as a POC QoE score."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aio-pika>=10.1.1",
+    "fastapi>=0.143.3",
+    "httpx>=0.28.1",
+    "pydantic>=2.14.1",
+    "pymongo>=4.19.0",
+    "pyyaml>=6.0.3",
+    "uvicorn>=0.54.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

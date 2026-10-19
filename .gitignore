@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+output/*
+!output/.gitkeep
+web/node_modules/
+web/dist/
+.DS_Store
+.env
+.claude/settings.local.json

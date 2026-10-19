@@ -1,0 +1,37 @@
+# Scheduled runner, as used by the Docker image (D-27, D-28).
+# Per-instance details come from environment variables, which override this file:
+#   QOE_DEVICE_ID, QOE_TRAIN_ID, QOE_JOURNEY_ID, QOE_TARGET_URL, QOE_RABBITMQ_URL,
+#   QOE_RUN_DURATION_SECONDS, QOE_SCHEDULE_INTERVAL_SECONDS, QOE_SCHEDULE_JITTER_SECONDS, ...
+# Only target systems and networks you are authorised to test.
+target:
+  base_url: "http://test-endpoint:8000"   # compose service name; set QOE_TARGET_URL for a remote endpoint
+
+run:
+  duration_seconds: 60
+  concurrent_users: 5
+  request_timeout_seconds: 10
+  max_requests_per_second: 10
+  max_mbps: 50
+
+profile:
+  type: "web_browsing"
+  think_time_min_ms: 100
+  think_time_max_ms: 1000
+  payload_min_kb: 50
+  payload_max_kb: 500
+  server_delay_min_ms: 0
+  server_delay_max_ms: 200
+  error_rate: 0.02
+
+schedule:
+  interval_seconds: 900     # a 60 s run every 15 minutes (~7% of the time)
+  jitter_seconds: 30        # random 0-30 s delay per start, so a fleet does not test in lockstep
+  keep_output_runs: 96      # result files kept on disk: one day at this interval
+
+metadata:
+  # device_id defaults to the container hostname; set QOE_DEVICE_ID to the router's id.
+  train_id: "unknown-train"
+  journey_id: "unknown-journey"
+
+publish:
+  rabbitmq_url: "amqp://qoe:qoe@rabbitmq:5672/"

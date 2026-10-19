@@ -1,0 +1,102 @@
+# The whole stack: infrastructure, test endpoint, ingest worker, dashboard, and example runners.
+#   docker compose up -d --build
+# Ports are published on 127.0.0.1 only; credentials are local-development values (D-21).
+
+x-app: &app
+  build: .
+  image: onboard-qoe:latest
+  init: true                    # reaps child processes and forwards signals
+  restart: unless-stopped
+  environment: &app-env
+    QOE_RABBITMQ_URL: amqp://qoe:qoe@rabbitmq:5672/
+    QOE_MONGO_URL: mongodb://mongodb:27017
+    QOE_MONGO_DB: qoe
+
+# A scheduled runner: a 60 s test every 15 minutes (configs/runner.yaml), configured per instance
+# through QOE_* environment variables (D-28). Copy a runner block below to add an instance.
+x-runner: &runner
+  <<: *app
+  command: ["python", "-m", "app.traffic_generator.main", "--config", "configs/runner.yaml"]
+  depends_on:
+    rabbitmq: { condition: service_healthy }
+    test-endpoint: { condition: service_started }
+  stop_grace_period: 30s        # time to finish the current run's summary on `docker stop`
+  volumes:
+    - runner-output:/app/output # one subdirectory per device id
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    environment:
+      # The built-in guest user only accepts loopback connections, which a Docker
+      # port mapping is not, so a dedicated dev user is created instead.
+      RABBITMQ_DEFAULT_USER: qoe
+      RABBITMQ_DEFAULT_PASS: qoe
+    ports:
+      - "127.0.0.1:5672:5672"     # AMQP
+      - "127.0.0.1:15672:15672"   # management UI: http://127.0.0.1:15672 (qoe / qoe)
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  mongodb:
+    image: mongo:8.0
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  # Stand-in for a remote internet service. In a real deployment it runs off the train and
+  # runners point at it with QOE_TARGET_URL.
+  test-endpoint:
+    <<: *app
+    command: ["uvicorn", "app.test_server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  ingest-worker:
+    <<: *app
+    command: ["python", "-m", "app.ingest_worker.main"]
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      mongodb: { condition: service_healthy }
+
+  dashboard:
+    <<: *app
+    command: ["uvicorn", "app.dashboard_api.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "127.0.0.1:8001:8001"     # dashboard: http://127.0.0.1:8001
+    depends_on:
+      mongodb: { condition: service_healthy }
+
+  # --- Example runners: two routers on two trains ---
+
+  runner-train-101:
+    <<: *runner
+    environment:
+      <<: *app-env
+      QOE_DEVICE_ID: router-101-a
+      QOE_TRAIN_ID: train-101
+      QOE_JOURNEY_ID: journey-101-0700
+
+  runner-train-202:
+    <<: *runner
+    environment:
+      <<: *app-env
+      QOE_DEVICE_ID: router-202-a
+      QOE_TRAIN_ID: train-202
+      QOE_JOURNEY_ID: journey-202-0715
+
+volumes:
+  rabbitmq-data:
+  mongo-data:
+  runner-output:

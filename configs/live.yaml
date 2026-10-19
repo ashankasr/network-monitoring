@@ -1,0 +1,29 @@
+# Same traffic as example.yaml, plus live publishing to RabbitMQ for the dashboard.
+# Requires `docker compose up -d`, the ingest worker and the dashboard API (see README).
+target:
+  base_url: "http://127.0.0.1:8000"
+
+run:
+  duration_seconds: 300
+  concurrent_users: 5
+  request_timeout_seconds: 10
+  max_requests_per_second: 10
+  max_mbps: 50
+
+profile:
+  type: "web_browsing"
+  think_time_min_ms: 100
+  think_time_max_ms: 1000
+  payload_min_kb: 50
+  payload_max_kb: 500
+  server_delay_min_ms: 0
+  server_delay_max_ms: 200
+  error_rate: 0.02
+
+metadata:
+  device_id: "poc-device-001"
+  train_id: "train-poc-001"
+  journey_id: "journey-poc-001"
+
+publish:
+  rabbitmq_url: "amqp://qoe:qoe@127.0.0.1:5672/"   # local docker-compose credentials

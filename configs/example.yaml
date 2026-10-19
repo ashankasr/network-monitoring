@@ -1,0 +1,26 @@
+# Example run against a local test endpoint. Only target systems you are authorised to test.
+target:
+  base_url: "http://127.0.0.1:8000"
+
+run:
+  duration_seconds: 30
+  concurrent_users: 5
+  request_timeout_seconds: 10
+  max_requests_per_second: 10   # global, across all users
+  max_mbps: 50                  # global planned-bandwidth budget
+  # seed: 42                    # uncomment for a reproducible request sequence
+
+profile:
+  type: "web_browsing"
+  think_time_min_ms: 100        # pause between a user's requests
+  think_time_max_ms: 1000
+  payload_min_kb: 50
+  payload_max_kb: 500
+  server_delay_min_ms: 0        # artificial server-side delay (not counted as latency)
+  server_delay_max_ms: 200
+  error_rate: 0.02              # share of requests sent to /failure
+
+metadata:
+  device_id: "poc-device-001"
+  train_id: "train-poc-001"
+  journey_id: "journey-poc-001"

@@ -83,11 +83,22 @@ def test_prune_keeps_newest_runs(tmp_path: Path) -> None:
         if i != 1:  # run1 was killed before its summary was written
             (tmp_path / f"run{i}-summary.json").write_text("{}")
         os.utime(tmp_path / f"run{i}-requests.jsonl", (i, i))
-    removed = prune_outputs(tmp_path, keep=2)
+    (tmp_path / "outbox.db").write_text("")
+    removed = prune_outputs(tmp_path, keep=2, max_bytes=1_000_000)
     assert sorted(removed) == ["run0", "run1", "run2"]
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "run3-requests.jsonl", "run3-summary.json", "run4-requests.jsonl", "run4-summary.json",
+        "outbox.db", "run3-requests.jsonl", "run3-summary.json", "run4-requests.jsonl", "run4-summary.json",
     ]
+
+
+def test_prune_keeps_newest_runs_within_the_size_cap(tmp_path: Path) -> None:
+    for i in range(5):
+        (tmp_path / f"run{i}-requests.jsonl").write_text("x" * 98)
+        (tmp_path / f"run{i}-summary.json").write_text("{}")  # 100 bytes per run
+        os.utime(tmp_path / f"run{i}-requests.jsonl", (i, i))
+    assert sorted(prune_outputs(tmp_path, keep=10, max_bytes=250)) == ["run0", "run1", "run2"]
+    assert sorted(prune_outputs(tmp_path, keep=10, max_bytes=50)) == ["run3", "run4"]  # even the newest
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize(

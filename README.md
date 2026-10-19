@@ -83,9 +83,25 @@ generates traffic about 7 % of the time.
   is skipped and logged. The schedule continues.
 - **Stopping:** `docker stop` (SIGTERM) or Ctrl+C ends the current run early.
   Its summary is still written and published (D-29).
-- **Disk use:** results are kept in `output/<device-id>/` (a named volume in
-  Docker). Only the newest `keep_output_runs` runs are kept (default 96, one
-  day); MongoDB keeps the history (D-30).
+- **Offline delivery:** every event is stored in `output/<device-id>/outbox.db`
+  (SQLite) before it is published, and deleted once RabbitMQ confirms it. If
+  the broker is unreachable, even at startup, the runner keeps measuring and
+  the events wait there. They are sent between runs once the broker is back.
+  The outbox is capped at `QOE_MAX_OUTBOX_MB` (default 200 MB, about 7 days);
+  beyond that the oldest events are dropped with a warning (D-32).
+  - SQLite runs inside the runner process; there is no separate service. The
+    file lives on the host and survives container restarts and rebuilds.
+  - Each `QOE_DEVICE_ID` must belong to exactly one runner, because the outbox
+    is found by device id. Changing a router's id leaves its backlog unsent.
+  - Don't open `outbox.db` from the host while its runner is running. Check
+    the runner's `Events: … waiting in the outbox` log line instead, or stop
+    the runner first.
+- **Disk use:** result files are kept in `output/<device-id>/`, which compose
+  bind-mounts from `./output` on the host. They are a byproduct; nothing reads
+  them back. The newest runs are kept within both `keep_output_runs` (default
+  96, one day) and `QOE_MAX_OUTPUT_MB` (default 50 MB); MongoDB keeps the
+  history (D-33). On a Linux host, make the folder writable by the container
+  user first: `sudo chown 10001 output` (D-34).
 
 ### Per-instance settings (environment variables)
 
@@ -105,7 +121,9 @@ Values are validated with the same limits as the YAML.
 | `QOE_CONCURRENT_USERS` | `run.concurrent_users` | Simulated users per run |
 | `QOE_MAX_REQUESTS_PER_SECOND` | `run.max_requests_per_second` | Request-rate cap |
 | `QOE_MAX_MBPS` | `run.max_mbps` | Bandwidth cap |
+| `QOE_MAX_OUTPUT_MB` | `schedule.max_output_mb` | Disk cap for result files (default 50) |
 | `QOE_RABBITMQ_URL` | `publish.rabbitmq_url` | Broker URL. It only applies when the config has a `publish` section; it never enables publishing by itself |
+| `QOE_MAX_OUTBOX_MB` | `publish.max_outbox_mb` | Disk cap for events not yet delivered (default 200) |
 
 ### Running one or many instances
 
@@ -167,9 +185,11 @@ publishing). Unknown keys are rejected.
 | `schedule.interval_seconds` | 900 | 60–86400 | Present = scheduled mode |
 | `schedule.jitter_seconds` | 30 | ≤ 3600 | Random start delay per run |
 | `schedule.max_runs` | none | ≥ 1 | Stop after N runs (none: until stopped) |
-| `schedule.keep_output_runs` | 96 | 1–10000 | Result files kept on disk |
+| `schedule.keep_output_runs` | 96 | 1–10000 | Runs whose result files are kept on disk |
+| `schedule.max_output_mb` | 50 | 1–10000 | Disk cap for result files; the tighter of the two limits applies |
 | `publish.rabbitmq_url` | `amqp://qoe:qoe@127.0.0.1:5672/` | amqp(s) | Present = publish live events |
-| `publish.buffer_size` | 10000 | 100–1M | Events buffered while the broker is slow or down |
+| `publish.buffer_size` | 10000 | 100–1M | Events held in memory while the broker is slow or down. Beyond it, scheduled runners keep them in the outbox only; single runs drop them |
+| `publish.max_outbox_mb` | 200 | 1–10000 | Scheduled runners: disk cap for undelivered events |
 
 CLI flags: `--config`, `--duration`, `--users`, `--interval` (turns scheduling
 on), `--once` (ignores the schedule), `--output-dir`.
@@ -303,7 +323,7 @@ The tests cover:
 - the scheduler's cadence, jitter and retention
 - percentiles, throughput and QoE
 - end-to-end runs, including cancellation
-- the event contract and publisher buffering
+- the event contract, publisher buffering and the outbox (backlog, cap, retries)
 - the worker's ack rules and idempotent writes
 - the dashboard queries
 

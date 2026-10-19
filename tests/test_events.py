@@ -32,4 +32,4 @@ def test_publisher_buffers_without_blocking_and_drops_when_full() -> None:
     publisher = asyncio.run(go())
     assert publisher.enqueued == 3
     assert publisher.dropped == 2
-    assert publisher.undelivered == 3
+    assert publisher.pending == 3

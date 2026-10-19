@@ -94,8 +94,11 @@ class PublishConfig(StrictModel):
     """Optional live publishing of events to RabbitMQ (D-23)."""
 
     rabbitmq_url: str = settings.RABBITMQ_URL
-    # Events held in memory while the broker is slow or unreachable; beyond this, new events are dropped.
+    # Events held in memory while the broker is slow or unreachable. Beyond this, a scheduled runner
+    # keeps them in its outbox only; a single run drops them.
     buffer_size: int = Field(10_000, ge=100, le=1_000_000)
+    # Scheduled runners: disk cap for events not yet confirmed by the broker (D-32).
+    max_outbox_mb: int = Field(200, ge=1, le=10_000)
 
     @field_validator("rabbitmq_url")
     @classmethod
@@ -114,7 +117,9 @@ class ScheduleConfig(StrictModel):
     # Stop after this many runs; null runs until the process is stopped.
     max_runs: int | None = Field(None, ge=1)
     # Result files kept on disk; older runs are deleted (MongoDB keeps the long-term history).
+    # Both limits apply; whichever is reached first wins (D-33).
     keep_output_runs: int = Field(96, ge=1, le=10_000)
+    max_output_mb: int = Field(50, ge=1, le=10_000)
 
 
 class Config(StrictModel):
@@ -161,7 +166,9 @@ ENV_OVERRIDES: dict[str, tuple[str, str, bool]] = {
     "QOE_MAX_MBPS": ("run", "max_mbps", True),
     "QOE_SCHEDULE_INTERVAL_SECONDS": ("schedule", "interval_seconds", True),
     "QOE_SCHEDULE_JITTER_SECONDS": ("schedule", "jitter_seconds", True),
+    "QOE_MAX_OUTPUT_MB": ("schedule", "max_output_mb", False),
     "QOE_RABBITMQ_URL": ("publish", "rabbitmq_url", False),
+    "QOE_MAX_OUTBOX_MB": ("publish", "max_outbox_mb", False),
 }
 
 

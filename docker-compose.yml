@@ -22,7 +22,9 @@ x-runner: &runner
     test-endpoint: { condition: service_started }
   stop_grace_period: 30s        # time to finish the current run's summary on `docker stop`
   volumes:
-    - runner-output:/app/output # one subdirectory per device id
+    # Result files and the outbox, one subdirectory per device id (D-34). On a Linux host the
+    # folder must be writable by the container user: sudo chown 10001 output
+    - ./output:/app/output
 
 services:
   rabbitmq:
@@ -99,4 +101,3 @@ services:
 volumes:
   rabbitmq-data:
   mongo-data:
-  runner-output:

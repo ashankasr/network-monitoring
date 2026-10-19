@@ -148,6 +148,18 @@ def test_environment_values_are_validated(tmp_path: Path) -> None:
         load_config(path, environ={"QOE_CONCURRENT_USERS": "500"})
 
 
+def test_disk_caps_come_from_the_environment_but_enable_nothing(tmp_path: Path) -> None:
+    path = write(tmp_path, 'target:\n  base_url: "http://127.0.0.1:8000"\n')
+    env = {"QOE_MAX_OUTBOX_MB": "500", "QOE_MAX_OUTPUT_MB": "20"}
+    config = load_config(path, environ=env)
+    assert config.publish is None and config.schedule is None
+    config = load_config(EXAMPLE.parent / "runner.yaml", environ=env)
+    assert config.publish is not None and config.publish.max_outbox_mb == 500
+    assert config.schedule is not None and config.schedule.max_output_mb == 20
+    with pytest.raises(ValidationError, match="max_outbox_mb"):
+        load_config(EXAMPLE.parent / "runner.yaml", environ={"QOE_MAX_OUTBOX_MB": "0"})
+
+
 def test_empty_environment_values_are_ignored(tmp_path: Path) -> None:
     path = write(tmp_path, 'target:\n  base_url: "http://127.0.0.1:8000"\nmetadata:\n  train_id: "yaml-train"\n')
     assert load_config(path, environ={"QOE_TRAIN_ID": "  "}).metadata.train_id == "yaml-train"
